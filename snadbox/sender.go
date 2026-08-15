@@ -7,16 +7,194 @@
 * - Only access directory where snad is opened
 * - Store directories of sent files so same file cannot be sent twice
 * - Distribute threads amongst files
-*/
+ */
 
 package snadbox
 
 import (
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"fmt"
-	"network"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
-	"time"
+	"sync"
+
+	"snad/components"
 )
 
+// Sender tracks files already sent during this process's lifetime, so
+// re-selecting the same peer (or the same files again) doesn't resend
+// files unnecessarily.
+type Sender struct {
+	baseDir string
+	sentMu  sync.Mutex
+	sent    components.Set[string]
+}
 
+// NewSender sandboxes file access to baseDir (the directory snad was
+// launched from) -- any file argument outside baseDir is rejected.
+func NewSender(baseDir string) (*Sender, error) {
+	abs, err := filepath.Abs(baseDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve base directory: %w", err)
+	}
+	return &Sender{baseDir: abs, sent: components.CreateSet[string]()}, nil
+}
 
+// resolve validates that path lies within the sender's base directory and
+// returns its cleaned absolute form.
+func (s *Sender) resolve(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", path, err)
+	}
+	rel, err := filepath.Rel(s.baseDir, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s is outside the launch directory", path)
+	}
+	return abs, nil
+}
+
+// Send dials peer over TLS (pinned to its discovered fingerprint) once per
+// file, distributing the work across a bounded worker pool so multiple
+// files transfer concurrently.
+func (s *Sender) Send(local Identity, peer Member, files []string, events chan<- interface{}) {
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		abs, err := s.resolve(f)
+		if err != nil {
+			if events != nil {
+				events <- TransferError{Peer: peer.Name, File: f, Direction: DirectionSend, Err: err}
+			}
+			continue
+		}
+		paths = append(paths, abs)
+	}
+
+	workers := runtime.NumCPU()
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+	if workers < 1 {
+		return
+	}
+
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				if s.alreadySent(path) {
+					if events != nil {
+						events <- TransferSkipped{Peer: peer.Name, File: filepath.Base(path), Direction: DirectionSend}
+					}
+					continue
+				}
+				if err := s.sendOne(local, peer, path, events); err != nil {
+					if events != nil {
+						events <- TransferError{Peer: peer.Name, File: filepath.Base(path), Direction: DirectionSend, Err: err}
+					}
+					continue
+				}
+				s.markSent(path)
+			}
+		}()
+	}
+
+	for _, path := range paths {
+		jobs <- path
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func (s *Sender) alreadySent(path string) bool {
+	s.sentMu.Lock()
+	defer s.sentMu.Unlock()
+	return s.sent.Contains(path)
+}
+
+func (s *Sender) markSent(path string) {
+	s.sentMu.Lock()
+	defer s.sentMu.Unlock()
+	s.sent.Add(path)
+}
+
+// sendOne opens its own TLS connection to peer and streams a single file.
+func (s *Sender) sendOne(local Identity, peer Member, path string, events chan<- interface{}) error {
+	conn, err := tls.Dial("tcp", peer.Addr(), clientTLSConfig(local, peer.Fingerprint))
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", peer.Name, err)
+	}
+	defer conn.Close()
+
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	sum, err := fileChecksum(f)
+	if err != nil {
+		return fmt.Errorf("checksum %s: %w", path, err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind %s: %w", path, err)
+	}
+
+	name := filepath.Base(path)
+	header := FileHeader{Name: name, Size: info.Size(), SHA256: sum}
+	if err := writeHeader(conn, header); err != nil {
+		return err
+	}
+
+	accept, err := readAck(conn)
+	if err != nil {
+		return fmt.Errorf("read ack: %w", err)
+	}
+	if !accept {
+		if events != nil {
+			events <- TransferSkipped{Peer: peer.Name, File: name, Direction: DirectionSend}
+		}
+		return nil
+	}
+
+	if events != nil {
+		events <- TransferStarted{Peer: peer.Name, File: name, Size: info.Size(), Direction: DirectionSend}
+	}
+
+	progress := newProgressWriter(info.Size(), func(written int64) {
+		if events != nil {
+			events <- TransferProgress{Peer: peer.Name, File: name, Sent: written, Total: info.Size(), Direction: DirectionSend}
+		}
+	})
+
+	dst := io.MultiWriter(conn, progress)
+	if _, err := io.Copy(dst, f); err != nil {
+		return fmt.Errorf("send body: %w", err)
+	}
+
+	if events != nil {
+		events <- TransferDone{Peer: peer.Name, File: name, Direction: DirectionSend}
+	}
+	return nil
+}
+
+func fileChecksum(f *os.File) (string, error) {
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
