@@ -10,8 +10,15 @@ import (
 	"snad/tui"
 )
 
+var version = "dev"
+
 func main() {
 	files := os.Args[1:]
+
+	if len(files) == 1 && (files[0] == "--version" || files[0] == "-v") {
+		fmt.Println("snad", version)
+		return
+	}
 
 	cwd, err := os.Getwd()
 	if err != nil {

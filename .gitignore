@@ -1,3 +1,4 @@
 /snad
 *.test
 *.out
+/dist
