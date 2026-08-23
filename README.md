@@ -1,8 +1,15 @@
-# snad
+# snad <sub><img width="35" height="35" alt="Snad Block" src="https://github.com/user-attachments/assets/922457ae-13a3-4322-af56-c80b95cb34f5" /></sub>
 
 Send files to other devices over your local network peer-to-peer through a TUI interface.
 Running this in a directory discovers other instances from other devices on your local network.
 Pick a device and send files directly through an authenticated and encrypted connection.
+
+**Origin Story**
+
+I wanted to build a local file transferring application. I planned for devices to discover each other
+on something I originally called a "sandbox". I mistyped this as "snadbox". Instead of correcting the mistake,
+I let the name of the project be "snad" as a shortened version of this feature.
+
 
 **Benefits**
 
