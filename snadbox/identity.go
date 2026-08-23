@@ -76,9 +76,26 @@ func NewIdentity(taken components.Set[string]) (Identity, error) {
 		return Identity{}, err
 	}
 
+	name, err := components.GenerateName(taken)
+	if err != nil {
+		return Identity{}, fmt.Errorf("generate name: %w", err)
+	}
+
 	return Identity{
-		Name:        components.GenerateName(taken),
+		Name:        name,
 		Fingerprint: fingerprint,
 		Cert:        cert,
 	}, nil
+}
+
+// sign produces an ECDSA (ASN.1 DER) signature over digest using this
+// identity's private key -- the generic "prove I hold the key behind my
+// certificate" primitive that UDP discovery builds its message
+// authentication on (see snadbox.go's hashDiscoveryPayload/announce).
+func (id Identity) sign(digest []byte) ([]byte, error) {
+	key, ok := id.Cert.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("identity private key is not ECDSA")
+	}
+	return ecdsa.SignASN1(rand.Reader, key, digest)
 }
