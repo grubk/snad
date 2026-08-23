@@ -79,7 +79,8 @@ type Model struct {
 	transfers map[transferKey]*transferState
 	order     []transferKey
 
-	quitting bool
+	receiverErr error
+	quitting    bool
 }
 
 // New builds the initial model. files is the set of paths staged to send
@@ -214,6 +215,9 @@ func (m *Model) handleEvent(raw interface{}) tea.Cmd {
 		}
 		t.failed = true
 		t.err = e.Err
+
+	case snadbox.ReceiverStopped:
+		m.receiverErr = e.Err
 	}
 	return nil
 }
@@ -225,6 +229,11 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "%s  you are %s\n\n", titleStyle.Render("snad"), identityStyle.Render(m.identity.Name))
+
+	if m.receiverErr != nil {
+		b.WriteString(errorStyle.Render("receiver stopped: " + m.receiverErr.Error()))
+		b.WriteString("\n\n")
+	}
 
 	b.WriteString(sectionStyle.Render("snadbox members"))
 	b.WriteString("\n")
