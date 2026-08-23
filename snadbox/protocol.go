@@ -95,10 +95,23 @@ func clientTLSConfig(local Identity, expectedFingerprint [32]byte) *tls.Config {
 }
 
 // serverTLSConfig is used by the receiver's listener to present its
-// self-signed certificate to connecting senders.
-func serverTLSConfig(local Identity) *tls.Config {
+// self-signed certificate to connecting senders, and to require and check
+// the connecting sender's certificate against isKnownPeer -- so only
+// devices we've actually discovered (via authenticated UDP discovery) can
+// push files, rather than any device that can reach the listening port.
+func serverTLSConfig(local Identity, isKnownPeer func(fingerprint [32]byte) bool) *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{local.Cert},
+		ClientAuth:   tls.RequireAnyClientCert,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("client presented no certificate")
+			}
+			if !isKnownPeer(sha256.Sum256(rawCerts[0])) {
+				return fmt.Errorf("client certificate fingerprint is not a known peer")
+			}
+			return nil
+		},
 	}
 }
 
