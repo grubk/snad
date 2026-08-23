@@ -50,3 +50,10 @@ type TransferError struct {
 	Direction Direction
 	Err       error
 }
+
+// ReceiverStopped is emitted if Serve returns unexpectedly, so the TUI can
+// surface that the app has silently stopped accepting incoming files
+// instead of looking alive while doing nothing.
+type ReceiverStopped struct {
+	Err error
+}

@@ -35,7 +35,7 @@ func main() {
 	}
 	defer box.Leave()
 
-	ln, port, err := snadbox.Listen(box.Identity)
+	ln, port, err := snadbox.Listen(box.Identity, box.IsKnownFingerprint)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "snad: listen:", err)
 		os.Exit(1)
@@ -43,7 +43,11 @@ func main() {
 	defer ln.Close()
 	box.SetPort(port)
 
-	go snadbox.Serve(ln, cwd, events)
+	go func() {
+		if err := snadbox.Serve(ln, cwd, events); err != nil {
+			events <- snadbox.ReceiverStopped{Err: err}
+		}
+	}()
 
 	sender, err := snadbox.NewSender(cwd)
 	if err != nil {
