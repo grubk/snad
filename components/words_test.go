@@ -7,7 +7,10 @@ func TestGenerateNameAvoidsCollisions(t *testing.T) {
 	seen := make(map[string]bool)
 
 	for i := 0; i < 200; i++ {
-		name := GenerateName(taken)
+		name, err := GenerateName(taken)
+		if err != nil {
+			t.Fatalf("GenerateName: %v", err)
+		}
 		if seen[name] {
 			t.Fatalf("GenerateName returned a name already taken: %s", name)
 		}

@@ -38,21 +38,29 @@ var toys = []string{
 	"pinball", "pretzel", "raccoon", "sparkler", "spyglass", "walkie-talkie",
 }
 
-func randomWord(words []string) string {
+func randomWord(words []string) (string, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(words))))
 	if err != nil {
-		panic(err)
+		return "", fmt.Errorf("select random word: %w", err)
 	}
-	return words[n.Int64()]
+	return words[n.Int64()], nil
 }
 
 // GenerateName picks a random adjective-toy pair, retrying until it finds
 // one not already present in taken, guaranteeing uniqueness within a pool.
-func GenerateName(taken Set[string]) string {
+func GenerateName(taken Set[string]) (string, error) {
 	for {
-		name := fmt.Sprintf("%s-%s", randomWord(adjectives), randomWord(toys))
+		adj, err := randomWord(adjectives)
+		if err != nil {
+			return "", err
+		}
+		toy, err := randomWord(toys)
+		if err != nil {
+			return "", err
+		}
+		name := fmt.Sprintf("%s-%s", adj, toy)
 		if taken == nil || !taken.Contains(name) {
-			return name
+			return name, nil
 		}
 	}
 }
