@@ -45,10 +45,12 @@ func mapDirectory(dir string) (components.Set[string], error) {
 }
 
 // Listen opens a TLS listener on an OS-assigned port, presenting identity's
-// self-signed certificate to connecting senders. The caller advertises the
-// returned port via Snadbox.SetPort and runs Serve in a goroutine.
-func Listen(identity Identity) (net.Listener, int, error) {
-	ln, err := tls.Listen("tcp", ":0", serverTLSConfig(identity))
+// self-signed certificate to connecting senders and rejecting any
+// connection whose client certificate fingerprint isKnownPeer doesn't
+// recognize. The caller advertises the returned port via Snadbox.SetPort
+// and runs Serve in a goroutine.
+func Listen(identity Identity, isKnownPeer func(fingerprint [32]byte) bool) (net.Listener, int, error) {
+	ln, err := tls.Listen("tcp", ":0", serverTLSConfig(identity, isKnownPeer))
 	if err != nil {
 		return nil, 0, fmt.Errorf("listen: %w", err)
 	}
@@ -124,7 +126,7 @@ func handleConn(conn net.Conn, dir string, existing components.Set[string], mu *
 func receiveFile(conn net.Conn, reader *bufio.Reader, dir string, header FileHeader, peer string, events chan<- interface{}) error {
 	dest := filepath.Join(dir, filepath.Base(header.Name))
 
-	out, err := os.Create(dest)
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", dest, err)
 	}
