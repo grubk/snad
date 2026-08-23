@@ -6,6 +6,8 @@ import (
 	"crypto/x509"
 	"testing"
 	"time"
+
+	"snad/components"
 )
 
 func TestNewIdentityFingerprintMatchesCert(t *testing.T) {
