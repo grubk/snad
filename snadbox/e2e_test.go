@@ -1,8 +1,6 @@
 package snadbox
 
 import (
-	"encoding/hex"
-	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,84 +8,12 @@ import (
 	"time"
 )
 
-// TestDiscoveryParsesAnnounce verifies that Snadbox correctly parses an
-// incoming UDP discovery announce and surfaces it as a MemberJoined event.
-// A plain (non-multicast-member) UDP socket is used as the sender: Go's
-// ListenMulticastUDP disables IP_MULTICAST_LOOP on its own socket (correct
-// for real deployments, where two devices are two different hosts and
-// don't need to hear their own announcements), so two Join()'d sockets on
-// the *same* host in a test/dev sandbox won't hear each other. A plain
-// sender socket sidesteps that self-loopback restriction, which is exactly
-// the same mechanism a real second host on the LAN relies on.
-func TestDiscoveryParsesAnnounce(t *testing.T) {
-	events := make(chan interface{}, 8)
-	box, err := Join(events)
-	if err != nil {
-		t.Fatalf("join: %v", err)
-	}
-	defer box.Leave()
-
-	sender, err := net.DialUDP("udp4", nil, mustResolve(t, PoolAddress))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer sender.Close()
-
-	var fp [32]byte
-	fp[0] = 0xAB
-	msg := wireMessage{
-		Id:          "test-peer",
-		Status:      statusHere,
-		Fingerprint: hex.EncodeToString(fp[:]),
-		Port:        4242,
-	}
-	enc, err := json.Marshal(msg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	deadline := time.After(5 * time.Second)
-	for {
-		if _, err := sender.Write(enc); err != nil {
-			t.Fatalf("write announce: %v", err)
-		}
-		select {
-		case e := <-events:
-			joined, ok := e.(MemberJoined)
-			if !ok {
-				continue
-			}
-			if joined.Member.Name != "test-peer" || joined.Member.Port != 4242 {
-				t.Fatalf("unexpected member: %+v", joined.Member)
-			}
-			if joined.Member.Fingerprint != fp {
-				t.Fatalf("fingerprint mismatch: got %x want %x", joined.Member.Fingerprint, fp)
-			}
-			if m, ok := box.Member("test-peer"); !ok || m.Port != 4242 {
-				t.Fatalf("member not tracked in Snadbox: %+v ok=%v", m, ok)
-			}
-			return
-		case <-time.After(200 * time.Millisecond):
-		case <-deadline:
-			t.Fatal("timed out waiting for MemberJoined event")
-		}
-	}
-}
-
-func mustResolve(t *testing.T, addr string) *net.UDPAddr {
-	t.Helper()
-	a, err := net.ResolveUDPAddr("udp4", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a
-}
-
 // TestSendReceiveAndDedup exercises the full TCP+TLS transfer pipeline:
-// fingerprint-pinned dial, header/ack framing, checksum verification, and
-// receiver-side dedup against files already on disk. The peer is pointed
-// directly at a loopback listener rather than discovered via UDP, since
-// discovery itself is covered by TestDiscoveryParsesAnnounce.
+// fingerprint-pinned dial, mutual-TLS peer authentication, header/ack
+// framing, checksum verification, and receiver-side dedup against files
+// already on disk. The peer is pointed directly at a loopback listener
+// rather than discovered via UDP, since discovery itself is covered by
+// discovery_test.go.
 func TestSendReceiveAndDedup(t *testing.T) {
 	aDir := t.TempDir()
 	bDir := t.TempDir()
@@ -107,8 +33,10 @@ func TestSendReceiveAndDedup(t *testing.T) {
 		t.Fatalf("identity b: %v", err)
 	}
 
+	isKnownPeer := func(fp [32]byte) bool { return fp == identityA.Fingerprint }
+
 	bEvents := make(chan interface{}, 64)
-	bLn, bPort, err := Listen(identityB)
+	bLn, bPort, err := Listen(identityB, isKnownPeer)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -237,4 +165,60 @@ func NewTestIdentity(t *testing.T) Identity {
 		t.Fatal(err)
 	}
 	return id
+}
+
+// TestReceiverRejectsUnknownFingerprint verifies the receiver's mutual-TLS
+// check: a sender whose certificate fingerprint isKnownPeer doesn't
+// recognize must be rejected at the handshake, not merely at the
+// application layer.
+func TestReceiverRejectsUnknownFingerprint(t *testing.T) {
+	dir := t.TempDir()
+
+	receiverIdentity := NewTestIdentity(t)
+	knownIdentity := NewTestIdentity(t)
+	strangerIdentity := NewTestIdentity(t)
+
+	isKnownPeer := func(fp [32]byte) bool { return fp == knownIdentity.Fingerprint }
+
+	events := make(chan interface{}, 8)
+	ln, port, err := Listen(receiverIdentity, isKnownPeer)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go Serve(ln, dir, events)
+
+	peer := Member{
+		Name:        receiverIdentity.Name,
+		IP:          net.ParseIP("127.0.0.1"),
+		Port:        port,
+		Fingerprint: receiverIdentity.Fingerprint,
+		LastSeen:    time.Now(),
+	}
+
+	srcPath := filepath.Join(t.TempDir(), "nope.txt")
+	if err := os.WriteFile(srcPath, []byte("should not arrive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sender, err := NewSender(filepath.Dir(srcPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	senderEvents := make(chan interface{}, 8)
+	sender.Send(strangerIdentity, peer, []string{srcPath}, senderEvents)
+
+	select {
+	case e := <-senderEvents:
+		if _, ok := e.(TransferError); !ok {
+			t.Fatalf("expected TransferError for unknown-fingerprint sender, got %#v", e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the handshake to be rejected")
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "nope.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected no file to be written, stat error: %v", err)
+	}
 }
