@@ -71,7 +71,8 @@ func TestIdentitySignVerifiesAgainstOwnCert(t *testing.T) {
 func TestNewIdentityAvoidsTakenNames(t *testing.T) {
 	first := NewTestIdentity(t)
 
-	taken := CreateTestSet(first.Name)
+	taken := components.CreateSet[string]()
+	taken.Add(first.Name)
 	second, err := NewIdentity(taken)
 	if err != nil {
 		t.Fatalf("NewIdentity: %v", err)
