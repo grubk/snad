@@ -19,17 +19,27 @@ I let the name of the project be "snad" as a shortened version of this feature.
 
 ## Install
 
+**Linux/macOS:**
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/grubk/snad/main/install.sh | sh
 ```
 
-This downloads the latest release for your OS/architecture (Linux and macOS,
-amd64/arm64) and installs it to `~/.local/bin` — no Go toolchain required.
-Make sure that directory is on your `PATH` (the script tells you if it
-isn't).
+This installs to `~/.local/bin`. Make sure that directory is on your `PATH`
+(the script tells you if it isn't).
 
-Prefer not to pipe a script into `sh`? Grab a binary directly from the
-[releases page](https://github.com/grubk/snad/releases) instead.
+**Windows:**
+
+```powershell
+irm https://raw.githubusercontent.com/grubk/snad/main/install.ps1 | iex
+```
+
+This installs to `%LOCALAPPDATA%\snad` and adds it to your user `PATH`.
+
+Both scripts download the latest release for your OS/architecture
+(Linux, macOS, and Windows, amd64/arm64) — no Go toolchain required.
+Prefer not to pipe a script into your shell? Grab a binary directly from
+the [releases page](https://github.com/grubk/snad/releases) instead.
 
 ## Usage
 
@@ -77,6 +87,10 @@ not the open internet or an untrusted network. Specifically:
   can fix without a shared secret or CA.
 - Received files are written with `0600` permissions.
 
+**Windows note**: on first run, Windows Defender Firewall will likely
+prompt to allow `snad.exe` to accept incoming connections. Allow it — this
+is required for both UDP discovery and TLS file transfers to work.
+
 ## Development
 
 ```sh
@@ -99,4 +113,5 @@ git push origin v0.1.0
 
 This triggers `.github/workflows/release.yml`, which runs
 [GoReleaser](https://goreleaser.com) (config in `.goreleaser.yaml`) to build
-Linux/macOS binaries for amd64/arm64 and publish them as a GitHub Release.
+Linux/macOS/Windows binaries for amd64/arm64 and publish them as a GitHub
+Release.

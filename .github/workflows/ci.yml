@@ -7,7 +7,10 @@ on:
 
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,6 +25,7 @@ jobs:
         run: go vet ./...
 
       - name: Format check
+        if: runner.os == 'Linux'
         run: |
           fmt_out="$(gofmt -l .)"
           if [ -n "$fmt_out" ]; then
@@ -31,4 +35,9 @@ jobs:
           fi
 
       - name: Test
+        if: runner.os == 'Linux'
         run: go test ./... -race
+
+      - name: Test
+        if: runner.os == 'Windows'
+        run: go test ./...
