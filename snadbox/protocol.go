@@ -3,7 +3,7 @@
 * TCP+TLS connection between two peers:
 *
 * - FileHeader: a newline-delimited JSON header preceding each file's raw
-*   bytes on the wire (name, size, checksum)
+*   bytes on the wire (path, size, checksum)
 * - TLS helpers implementing trust-on-first-use certificate pinning: the
 *   sender already knows the receiver's certificate fingerprint from the
 *   UDP discovery announce, so no CA is needed
@@ -22,7 +22,7 @@ import (
 )
 
 type FileHeader struct {
-	Name   string `json:"name"`
+	Path   string `json:"path"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
 }
