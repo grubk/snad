@@ -9,7 +9,7 @@ import (
 
 func TestWriteReadHeaderRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
-	want := FileHeader{Name: "hello.txt", Size: 1234, SHA256: "abcdef"}
+	want := FileHeader{Path: "hello.txt", Size: 1234, SHA256: "abcdef"}
 
 	if err := writeHeader(&buf, want); err != nil {
 		t.Fatalf("writeHeader: %v", err)
@@ -21,6 +21,26 @@ func TestWriteReadHeaderRoundTrip(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("round trip mismatch: got %+v want %+v", got, want)
+	}
+}
+
+func TestWriteReadHeaderRoundTripWithNestedPath(t *testing.T) {
+	var buf bytes.Buffer
+	want := FileHeader{Path: "photos/sub/b.jpg", Size: 42, SHA256: "deadbeef"}
+
+	if err := writeHeader(&buf, want); err != nil {
+		t.Fatalf("writeHeader: %v", err)
+	}
+
+	got, err := readHeader(bufio.NewReader(&buf))
+	if err != nil {
+		t.Fatalf("readHeader: %v", err)
+	}
+	if got != want {
+		t.Fatalf("round trip mismatch: got %+v want %+v", got, want)
+	}
+	if got.Path != "photos/sub/b.jpg" {
+		t.Fatalf("expected slashes to survive round trip, got %q", got.Path)
 	}
 }
 
