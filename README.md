@@ -7,8 +7,8 @@ Pick a device and send files directly through an authenticated and encrypted con
 **Origin Story**
 
 I wanted to build a local file transferring application. I planned for devices to discover each other
-on something I originally called a "sandbox". I mistyped this as "snadbox". Instead of correcting the mistake,
-I let the name of the project be "snad" as a shortened version of this feature.
+on something I originally called a `sandbox`, which I mistyped as `snadbox`. Instead of correcting the mistake,
+I let the name of the project be `snad`.
 
 
 **Benefits**
