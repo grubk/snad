@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,6 +34,14 @@ type Sender struct {
 	baseDir string
 	sentMu  sync.Mutex
 	sent    components.Set[string]
+}
+
+// sendJob pairs a file's absolute path on local disk with the
+// slash-separated path used to identify it on the wire (FileHeader.Path)
+// and let the receiver reconstruct directory structure.
+type sendJob struct {
+	abs string
+	rel string
 }
 
 // NewSender sandboxes file access to baseDir (the directory snad was
@@ -59,11 +68,59 @@ func (s *Sender) resolve(path string) (string, error) {
 	return abs, nil
 }
 
+// expandDirectory recursively walks dirArg -- an already sandbox-validated
+// absolute path that Send determined is a directory -- into one sendJob per
+// regular file found. Symlinks are skipped entirely: they are never checked
+// against the sandbox perimeter enforced by resolve, so following one could
+// exfiltrate content from outside the sent folder.
+func expandDirectory(dirArg string) ([]sendJob, error) {
+	walkRoot := dirArg
+	lst, err := os.Lstat(dirArg)
+	if err != nil {
+		return nil, err
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		walkRoot, err = filepath.EvalSymlinks(dirArg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	parentDisplay := filepath.Base(dirArg)
+
+	var jobs []sendJob
+	err = filepath.WalkDir(walkRoot, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(walkRoot, p)
+		if err != nil {
+			return err
+		}
+		jobs = append(jobs, sendJob{abs: p, rel: filepath.ToSlash(filepath.Join(parentDisplay, rel))})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
 // Send dials peer over TLS (pinned to its discovered fingerprint) once per
 // file, distributing the work across a bounded worker pool so multiple
-// files transfer concurrently.
+// files transfer concurrently. A directory argument is expanded recursively
+// into one job per regular file inside it, preserving its relative
+// structure on the wire.
 func (s *Sender) Send(local Identity, peer Member, files []string, events chan<- interface{}) {
-	paths := make([]string, 0, len(files))
+	var queue []sendJob
 	for _, f := range files {
 		abs, err := s.resolve(f)
 		if err != nil {
@@ -72,43 +129,61 @@ func (s *Sender) Send(local Identity, peer Member, files []string, events chan<-
 			}
 			continue
 		}
-		paths = append(paths, abs)
+		info, err := os.Stat(abs)
+		if err != nil {
+			if events != nil {
+				events <- TransferError{Peer: peer.Name, File: f, Direction: DirectionSend, Err: err}
+			}
+			continue
+		}
+		if info.IsDir() {
+			jobs, err := expandDirectory(abs)
+			if err != nil {
+				if events != nil {
+					events <- TransferError{Peer: peer.Name, File: f, Direction: DirectionSend, Err: err}
+				}
+				continue
+			}
+			queue = append(queue, jobs...)
+			continue
+		}
+		queue = append(queue, sendJob{abs: abs, rel: filepath.ToSlash(filepath.Base(abs))})
 	}
 
 	workers := runtime.NumCPU()
-	if workers > len(paths) {
-		workers = len(paths)
+	if workers > len(queue) {
+		workers = len(queue)
 	}
 	if workers < 1 {
 		return
 	}
 
-	jobs := make(chan string)
+	jobs := make(chan sendJob)
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for path := range jobs {
-				if s.alreadySent(path) {
+			for job := range jobs {
+				if s.alreadySent(job.abs) {
 					if events != nil {
-						events <- TransferSkipped{Peer: peer.Name, File: filepath.Base(path), Direction: DirectionSend}
+						events <- TransferSkipped{Peer: peer.Name, File: job.rel, Direction: DirectionSend}
 					}
 					continue
 				}
-				if err := s.sendOne(local, peer, path, events); err != nil {
+				if err := s.sendOne(local, peer, job, events); err != nil {
 					if events != nil {
-						events <- TransferError{Peer: peer.Name, File: filepath.Base(path), Direction: DirectionSend, Err: err}
+						events <- TransferError{Peer: peer.Name, File: job.rel, Direction: DirectionSend, Err: err}
 					}
 					continue
 				}
-				s.markSent(path)
+				s.markSent(job.abs)
 			}
 		}()
 	}
 
-	for _, path := range paths {
-		jobs <- path
+	for _, job := range queue {
+		jobs <- job
 	}
 	close(jobs)
 	wg.Wait()
@@ -127,34 +202,33 @@ func (s *Sender) markSent(path string) {
 }
 
 // sendOne opens its own TLS connection to peer and streams a single file.
-func (s *Sender) sendOne(local Identity, peer Member, path string, events chan<- interface{}) error {
+func (s *Sender) sendOne(local Identity, peer Member, job sendJob, events chan<- interface{}) error {
 	conn, err := tls.Dial("tcp", peer.Addr(), clientTLSConfig(local, peer.Fingerprint))
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", peer.Name, err)
 	}
 	defer conn.Close()
 
-	f, err := os.Open(path)
+	f, err := os.Open(job.abs)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return fmt.Errorf("open %s: %w", job.abs, err)
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("stat %s: %w", path, err)
+		return fmt.Errorf("stat %s: %w", job.abs, err)
 	}
 
 	sum, err := fileChecksum(f)
 	if err != nil {
-		return fmt.Errorf("checksum %s: %w", path, err)
+		return fmt.Errorf("checksum %s: %w", job.abs, err)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind %s: %w", path, err)
+		return fmt.Errorf("rewind %s: %w", job.abs, err)
 	}
 
-	name := filepath.Base(path)
-	header := FileHeader{Name: name, Size: info.Size(), SHA256: sum}
+	header := FileHeader{Path: job.rel, Size: info.Size(), SHA256: sum}
 	if err := writeHeader(conn, header); err != nil {
 		return err
 	}
@@ -165,18 +239,18 @@ func (s *Sender) sendOne(local Identity, peer Member, path string, events chan<-
 	}
 	if !accept {
 		if events != nil {
-			events <- TransferSkipped{Peer: peer.Name, File: name, Direction: DirectionSend}
+			events <- TransferSkipped{Peer: peer.Name, File: job.rel, Direction: DirectionSend}
 		}
 		return nil
 	}
 
 	if events != nil {
-		events <- TransferStarted{Peer: peer.Name, File: name, Size: info.Size(), Direction: DirectionSend}
+		events <- TransferStarted{Peer: peer.Name, File: job.rel, Size: info.Size(), Direction: DirectionSend}
 	}
 
 	progress := newProgressWriter(info.Size(), func(written int64) {
 		if events != nil {
-			events <- TransferProgress{Peer: peer.Name, File: name, Sent: written, Total: info.Size(), Direction: DirectionSend}
+			events <- TransferProgress{Peer: peer.Name, File: job.rel, Sent: written, Total: info.Size(), Direction: DirectionSend}
 		}
 	})
 
@@ -186,7 +260,7 @@ func (s *Sender) sendOne(local Identity, peer Member, path string, events chan<-
 	}
 
 	if events != nil {
-		events <- TransferDone{Peer: peer.Name, File: name, Direction: DirectionSend}
+		events <- TransferDone{Peer: peer.Name, File: job.rel, Direction: DirectionSend}
 	}
 	return nil
 }
